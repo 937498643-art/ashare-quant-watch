@@ -67,6 +67,7 @@ LATEST_HOLDINGS_PATH = DATA_DIR / "latest_holdings.csv"
 OUTPUT_DIR = DATA_DIR / "output"
 REFERENCE_CANDIDATES_PATH = OUTPUT_DIR / "reference_candidates.csv"
 V58_TOP50_PATH = OUTPUT_DIR / "v5_8_top50.csv"
+V59_CANDIDATE_HISTORY_DIR = DATA_DIR / "history" / "candidate_pools"
 V58_TOP50_REQUIRED_COLUMNS = [
     "code",
     "name",
@@ -82,6 +83,21 @@ V58_TOP50_REQUIRED_COLUMNS = [
     "data_quality_score",
     "data_quality_status",
     "v58_top50_eligible",
+]
+V59_CANDIDATE_SNAPSHOT_COLUMNS = [
+    "code",
+    "name",
+    "trade_date",
+    "price",
+    "pct_chg",
+    "amount",
+    "turnover_rate",
+    "volume_ratio",
+    "base_score",
+    "trading_quality_score",
+    "final_trade_score",
+    "risk_level",
+    "source_page",
 ]
 TUSHARE_CACHE_STATUS_PATH = DATA_DIR / "cache" / "tushare" / "tushare_cache_status.json"
 LOCAL_DAILY_HISTORY_DIR = DATA_DIR / "history" / "daily"
@@ -374,6 +390,7 @@ def run_once(config: dict[str, Any]) -> pd.DataFrame:
     ranked = pd.DataFrame(columns=RESULT_COLUMNS)
     v58_top50 = pd.DataFrame()
     v58_scored = pd.DataFrame()
+    v59_scoring_completed = False
     status_errors: list[str] = []
     status_warnings: list[str] = []
     sector_overview: dict[str, Any] = {"industry_top10": [], "concept_top10": [], "warnings": []}
@@ -579,6 +596,7 @@ def run_once(config: dict[str, Any]) -> pd.DataFrame:
                 market_score_fields=market_score_fields,
                 source_meta=source_meta,
             )
+            v59_scoring_completed = True
             ranked = attach_v58_fields_to_candidates(ranked, v58_scored)
             print(
                 "V5.9 全市场评分=%s，百分位基础分Top100=%s，交易质量Top50=%s"
@@ -646,6 +664,8 @@ def run_once(config: dict[str, Any]) -> pd.DataFrame:
         save_candidates(ranked)
         save_reference_candidates(reference_candidates)
         save_v58_top50(v58_top50)
+        if v59_scoring_completed:
+            save_v59_candidate_snapshot(v58_top50, started_at)
         save_auxiliary_csv(watchlist_rows, LATEST_WATCHLIST_PATH, "自选股")
         save_auxiliary_csv(holding_rows, LATEST_HOLDINGS_PATH, "持仓股")
         save_market_status(status)
@@ -934,6 +954,44 @@ def save_v58_top50(candidates: pd.DataFrame) -> None:
         if column not in output.columns:
             output[column] = pd.NA
     save_auxiliary_csv(output, V58_TOP50_PATH, "V5.8 Top50")
+
+
+def save_v59_candidate_snapshot(candidates: pd.DataFrame, scan_time: datetime) -> Path:
+    """Archive one immutable V5.9 Top50 candidate-pool snapshot per trade day.
+
+    The snapshot is a persistence-only copy of the already-generated V5.9
+    Top50.  It neither re-scores rows nor changes Top50 admission.  An existing
+    same-day file is deliberately retained so repeated intraday scans cannot
+    overwrite the point-in-time candidate record used by later backtests.
+    """
+    trade_date = pd.Timestamp(scan_time).strftime("%Y-%m-%d")
+    output_path = V59_CANDIDATE_HISTORY_DIR / f"v5_9_candidate_{trade_date.replace('-', '')}.csv"
+    if output_path.exists():
+        logging.getLogger("quant_stock_watch").info("V5.9 candidate snapshot already exists: %s", output_path)
+        print(f"V5.9 候选池历史快照已存在，保留原文件: {output_path}")
+        return output_path
+
+    source = candidates.copy()
+    snapshot = pd.DataFrame(index=source.index)
+    snapshot["code"] = (
+        source["code"].map(_normalize_stock_code)
+        if "code" in source.columns
+        else pd.Series("", index=source.index, dtype="string")
+    )
+    snapshot["name"] = source.get("name", pd.Series(pd.NA, index=source.index))
+    snapshot["trade_date"] = trade_date
+    for column in ("price", "pct_chg", "amount", "volume_ratio", "base_score", "trading_quality_score", "final_trade_score"):
+        snapshot[column] = pd.to_numeric(source.get(column, pd.Series(pd.NA, index=source.index)), errors="coerce")
+    snapshot["turnover_rate"] = _first_numeric_column(source, ("realtime_turnover_value", "turnover"))
+    risk_level = source.get("position_risk_level", pd.Series(pd.NA, index=source.index)).replace("", pd.NA)
+    snapshot["risk_level"] = risk_level.combine_first(source.get("risk_summary", pd.Series(pd.NA, index=source.index)))
+    snapshot["source_page"] = "V5.9 Top50交易观察池"
+    snapshot = snapshot.reindex(columns=V59_CANDIDATE_SNAPSHOT_COLUMNS)
+
+    V59_CANDIDATE_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    snapshot.to_csv(output_path, index=False, encoding="utf-8-sig")
+    print(f"V5.9 候选池历史快照已保存: {output_path}")
+    return output_path
 
 
 def build_and_save_reference_candidates(spot_quotes: pd.DataFrame, config: dict[str, Any]) -> pd.DataFrame:

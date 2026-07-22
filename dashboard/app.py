@@ -1166,12 +1166,11 @@ def render_strategy_tracking_pool_tab() -> None:
     if tracking_pool.empty:
         st.info("当前策略跟踪池为空。可在“今日交易候选池”“V5.9 Top50交易观察池”或“个股详情”加入股票。")
         return
-    st.dataframe(
+    render_strategy_tracking_exit_action_table(
+        tracking_pool,
         format_strategy_tracking_table(tracking_pool),
-        width="stretch",
-        hide_index=True,
     )
-    render_strategy_tracking_exit_form(tracking_pool)
+    render_strategy_tracking_exit_dialog(tracking_pool)
 
 
 def render_strategy_statistics_tab() -> None:
@@ -1242,45 +1241,150 @@ def format_strategy_reason_statistics(rows: list[dict[str, Any]]) -> pd.DataFram
     return clean_display_frame(data)
 
 
-def render_strategy_tracking_exit_form(tracking_pool: pd.DataFrame) -> None:
-    """Provide an explicit local close action; it never submits an order."""
-    active_pool = tracking_pool[tracking_pool["status"].fillna("").astype(str) != "已结束"].copy()
-    if active_pool.empty:
-        st.caption("当前没有进行中的策略跟踪记录。")
+def render_strategy_tracking_exit_action_table(
+    tracking_pool: pd.DataFrame,
+    display_data: pd.DataFrame,
+) -> None:
+    """Show the tracking ledger with a row-specific, local close action."""
+    source_rows = tracking_pool.reset_index(drop=True).copy()
+    table = display_data.reset_index(drop=True).copy()
+    if len(source_rows) != len(table):
+        st.error("策略跟踪表格行数不一致，当前未展示结束操作。")
+        render_compact_stock_dataframe(table)
         return
 
-    with st.expander("手动结束跟踪", expanded=False):
-        st.caption("该操作仅记录本地观察结束价格和收益率，不会发送交易指令。")
-        options = {
-            f"{display_text(row.get('name'))}（{str(row.get('code') or '').zfill(6)}）｜加入 {display_text(row.get('added_date'))}": row
-            for _, row in active_pool.iterrows()
-        }
-        with st.form("strategy_tracking_exit_form"):
-            selected_label = st.selectbox("选择要结束的跟踪股票", list(options.keys()))
-            selected_row = options[selected_label]
-            default_price = pd.to_numeric(selected_row.get("current_price"), errors="coerce")
-            exit_price = st.number_input(
-                "卖出价格（仅记录）",
-                min_value=0.0,
-                value=float(default_price) if pd.notna(default_price) and default_price > 0 else 0.0,
-                step=0.01,
-                format="%.3f",
-            )
-            exit_date = st.date_input("卖出日期", value=date.today())
-            exit_reason = st.text_input("结束原因", value="手动结束跟踪")
-            submitted = st.form_submit_button("结束跟踪")
+    is_closed = source_rows["status"].fillna("").astype(str).eq("已结束")
+    action_column = "操作"
+    table[action_column] = pd.Series("结束跟踪", index=table.index).where(~is_closed, "已结束")
+    click_key = "strategy_tracking_exit_table_click"
+    with st.container(horizontal_alignment="center"):
+        st.dataframe(
+            style_watch_table(table),
+            column_config={
+                **compact_table_column_config(table),
+                action_column: st.column_config.ButtonColumn(
+                    action_column,
+                    width=96,
+                    help="结束该股票的本地策略跟踪；不会发送交易指令。",
+                    type="secondary",
+                    on_click=_handle_strategy_tracking_exit_table_click,
+                    args=(source_rows, click_key),
+                    key=click_key,
+                ),
+            },
+            width="content",
+            hide_index=True,
+        )
 
-        if submitted:
-            ended, message = end_strategy_tracking_stock(
-                str(selected_row.get("tracking_id") or ""),
-                exit_price=exit_price,
-                exit_date=exit_date,
-                exit_reason=exit_reason,
-            )
-            if ended:
-                st.session_state["strategy_tracking_feedback"] = message
-                st.rerun()
-            _show_compact_feedback(message, tone="muted")
+
+def _handle_strategy_tracking_exit_table_click(source_rows: pd.DataFrame, click_key: str) -> None:
+    """Open the close-confirmation dialog only for the clicked tracking row."""
+    click = st.session_state.get(click_key)
+    try:
+        row_index = int(click.get("row"))
+    except (AttributeError, TypeError, ValueError):
+        return
+    if row_index < 0 or row_index >= len(source_rows):
+        return
+
+    row = source_rows.iloc[row_index]
+    if str(row.get("status") or "").strip() == "已结束":
+        st.session_state["strategy_tracking_feedback"] = {
+            "message": "该股票的策略跟踪已结束。",
+            "tone": "muted",
+        }
+        return
+
+    tracking_id = str(row.get("tracking_id") or "").strip()
+    if not tracking_id:
+        st.session_state["strategy_tracking_feedback"] = {
+            "message": "策略跟踪记录缺少唯一标识，无法结束。",
+            "tone": "muted",
+        }
+        return
+    st.session_state["strategy_tracking_exit_tracking_id"] = tracking_id
+
+
+def _clear_strategy_tracking_exit_dialog() -> None:
+    """Clear the row-specific dialog selection after dismissal or completion."""
+    st.session_state.pop("strategy_tracking_exit_tracking_id", None)
+
+
+@st.dialog("确认结束策略跟踪", width="small", on_dismiss=_clear_strategy_tracking_exit_dialog)
+def _render_strategy_tracking_exit_dialog(selected_row: pd.Series) -> None:
+    """Collect one local close record without touching trade or score logic."""
+    tracking_id = str(selected_row.get("tracking_id") or "").strip()
+    code = str(selected_row.get("code") or "").zfill(6)
+    name = display_text(selected_row.get("name"))
+    current_price = pd.to_numeric(selected_row.get("current_price"), errors="coerce")
+    default_price = float(current_price) if pd.notna(current_price) and current_price > 0 else 0.0
+
+    st.caption("该操作只记录本地观察结束信息，不会发送交易指令。")
+    with st.form(f"strategy_tracking_exit_form_{tracking_id}"):
+        st.text_input("股票代码", value=code, disabled=True)
+        st.text_input("股票名称", value=name, disabled=True)
+        st.number_input(
+            "当前价格",
+            min_value=0.0,
+            value=default_price,
+            step=0.01,
+            format="%.3f",
+            disabled=True,
+        )
+        exit_price = st.number_input(
+            "结束价格",
+            min_value=0.0,
+            value=default_price,
+            step=0.01,
+            format="%.3f",
+        )
+        exit_date = st.date_input("结束日期", value=date.today())
+        exit_reason = st.selectbox("结束原因", ["止盈", "止损", "时间退出", "人工观察结束", "其他"])
+        confirm_column, cancel_column = st.columns(2)
+        confirmed = confirm_column.form_submit_button("确认结束跟踪", type="primary", width="stretch")
+        cancelled = cancel_column.form_submit_button("取消", width="stretch")
+
+    if cancelled:
+        _clear_strategy_tracking_exit_dialog()
+        st.rerun()
+    if not confirmed:
+        return
+
+    ended, message = end_strategy_tracking_stock(
+        tracking_id,
+        exit_price=exit_price,
+        exit_date=exit_date,
+        exit_reason=exit_reason,
+    )
+    if ended:
+        _clear_strategy_tracking_exit_dialog()
+        st.session_state["strategy_tracking_feedback"] = {"message": message, "tone": "ok"}
+        st.rerun()
+    _show_compact_feedback(message, tone="muted")
+
+
+def render_strategy_tracking_exit_dialog(tracking_pool: pd.DataFrame) -> None:
+    """Resolve the selected row and invoke at most one Streamlit dialog."""
+    tracking_id = str(st.session_state.get("strategy_tracking_exit_tracking_id") or "").strip()
+    if not tracking_id:
+        return
+    selected = tracking_pool[tracking_pool["tracking_id"].astype(str) == tracking_id]
+    if selected.empty:
+        _clear_strategy_tracking_exit_dialog()
+        st.session_state["strategy_tracking_feedback"] = {
+            "message": "策略跟踪记录已不存在，无法结束。",
+            "tone": "muted",
+        }
+        st.rerun()
+    row = selected.iloc[0]
+    if str(row.get("status") or "").strip() == "已结束":
+        _clear_strategy_tracking_exit_dialog()
+        st.session_state["strategy_tracking_feedback"] = {
+            "message": "该股票的策略跟踪已结束。",
+            "tone": "muted",
+        }
+        st.rerun()
+    _render_strategy_tracking_exit_dialog(row)
 
 
 def render_watchlist_editor(user_watchlist: pd.DataFrame) -> None:
