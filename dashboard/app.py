@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from html import escape
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from backtest.paper_account import PaperAccountConfig, run_v59_paper_account
 from core.detail_analysis import build_detail_analysis, prepare_history_detail
 from core.t1_risk import analyze_t1_risk
 from data_sources.akshare_source import AkshareSource
@@ -55,6 +57,10 @@ V59_REQUIRED_OUTPUT_COLUMNS = {
     "final_trade_score",
 }
 CALCULATED_VOLUME_RATIO_PATH = DATA_DIR / "diagnostics" / "calculated_volume_ratio_sample.csv"
+V59_CANDIDATE_HISTORY_DIR = DATA_DIR / "history" / "candidate_pools"
+HISTORICAL_DAILY_DIR = DATA_DIR / "history" / "daily"
+STRATEGY_TRACKING_HISTORY_PATH = DATA_DIR / "user" / "strategy_tracking_history.csv"
+V59_PERFORMANCE_HOLDING_DAYS = (3, 5, 10)
 
 SOURCE_TYPE_STRATEGY = "strategy_candidate"
 SOURCE_TYPE_ACTIVE = "active_watchlist"
@@ -153,11 +159,12 @@ TODAY_TRADE_DISPLAY_COLUMNS = [
     "name",
     "code",
     "price_display",
-    "pct_chg_display",
-    "base_score_display",
     "final_trade_score_display",
+    "base_score_display",
     "turnover_display",
     "volume_ratio_display",
+    "pct_chg_display",
+    "amount_display",
     "money_strength_level",
     "data_quality_level_display",
     "trade_risk_level",
@@ -265,58 +272,66 @@ HOLDING_COLUMN_LABELS = {
 
 
 def apply_dashboard_style() -> None:
-    """Apply one restrained visual language across the watch dashboard."""
+    """Apply a compact, terminal-inspired visual system across the dashboard."""
     st.markdown(
         """
         <style>
+        :root {
+            --terminal-navy: #102a43;
+            --terminal-blue: #1d4ed8;
+            --terminal-muted: #667085;
+            --terminal-surface: #ffffff;
+            --terminal-border: #dce3ec;
+        }
         .stApp {
-            background: #f7f8fa;
-            color: #172033;
+            background: linear-gradient(180deg, #f4f7fb 0%, #f8fafc 34%, #f6f8fb 100%);
+            color: #102a43;
         }
         .main .block-container {
-            max-width: 1500px;
-            padding-top: 1.1rem;
-            padding-bottom: 2rem;
-            padding-left: 1.4rem;
-            padding-right: 1.4rem;
+            max-width: 1720px;
+            padding: 0.8rem 1.15rem 1.5rem;
         }
         section[data-testid="stSidebar"] {
-            background: #ffffff;
+            background: #f8fafc;
         }
         h1 {
-            font-size: 1.65rem;
-            line-height: 1.25;
-            margin: 0 0 0.12rem 0;
-            letter-spacing: 0;
+            color: var(--terminal-navy);
+            font-size: 1.72rem;
+            font-weight: 760;
+            line-height: 1.15;
+            margin: 0 0 0.08rem;
+            letter-spacing: -0.025em;
         }
         h2, h3 {
-            letter-spacing: 0;
-            margin-top: 1.15rem;
-            margin-bottom: 0.55rem;
+            color: var(--terminal-navy);
+            letter-spacing: -0.012em;
+            margin-top: 0.95rem;
+            margin-bottom: 0.42rem;
         }
-        h2 { font-size: 1.25rem; }
-        h3 { font-size: 1.05rem; }
+        h2 { font-size: 1.18rem; }
+        h3 { font-size: 1.02rem; }
         div[data-testid="stCaptionContainer"] {
             color: #6b7280;
         }
         div[data-testid="stTabs"] [data-baseweb="tab-list"] {
-            gap: 0.25rem;
-            border-bottom: 1px solid #e5e7eb;
-            margin-bottom: 0.85rem;
+            gap: 0.18rem;
+            border-bottom: 1px solid var(--terminal-border);
+            margin: 0.35rem 0 0.7rem;
         }
         div[data-testid="stTabs"] button {
-            font-weight: 600;
-            color: #667085;
-            height: 2.3rem;
-            padding: 0 0.8rem;
+            font-size: 0.88rem;
+            font-weight: 650;
+            color: #5d6878;
+            height: 2.16rem;
+            padding: 0 0.72rem;
         }
         div[data-testid="stTabs"] button[aria-selected="true"] {
-            color: #1d4ed8;
+            color: var(--terminal-blue);
         }
         div[data-testid="stAlert"] {
-            border-radius: 7px;
-            padding: 0.52rem 0.72rem;
-            margin: 0.45rem 0 0.7rem;
+            border-radius: 10px;
+            padding: 0.48rem 0.72rem;
+            margin: 0.35rem 0 0.6rem;
             border-width: 1px;
         }
         div[data-testid="stAlert"] p {
@@ -324,40 +339,45 @@ def apply_dashboard_style() -> None:
             line-height: 1.4;
         }
         details[data-testid="stExpander"], div[data-testid="stExpander"] {
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            background: #ffffff;
+            border: 1px solid var(--terminal-border);
+            border-radius: 10px;
+            background: var(--terminal-surface);
         }
         details[data-testid="stExpander"] summary {
             color: #344054;
             font-weight: 600;
         }
         div[data-testid="stMetric"] {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            padding: 10px 12px;
-            min-height: 74px;
+            background: var(--terminal-surface);
+            border: 1px solid var(--terminal-border);
+            border-radius: 10px;
+            padding: 9px 11px;
+            min-height: 70px;
+            box-shadow: 0 3px 12px rgba(15, 23, 42, 0.05);
         }
         div[data-testid="stMetricLabel"] p {
-            color: #5f6875;
-            font-size: 0.82rem;
+            color: var(--terminal-muted);
+            font-size: 0.76rem;
+            font-weight: 600;
         }
         div[data-testid="stMetricValue"] {
-            font-size: 1.05rem;
+            color: var(--terminal-navy);
+            font-size: 1.14rem;
+            font-weight: 740;
         }
         .stDataFrame {
-            border: 1px solid #edf0f2;
-            border-radius: 8px;
-            background: #ffffff;
+            border: 1px solid var(--terminal-border);
+            border-radius: 10px;
+            background: var(--terminal-surface);
+            box-shadow: 0 2px 10px rgba(15, 23, 42, 0.035);
         }
         .watch-card {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
+            background: var(--terminal-surface);
+            border: 1px solid var(--terminal-border);
+            border-radius: 10px;
             padding: 10px 12px;
-            min-height: 78px;
-            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.035);
+            min-height: 72px;
+            box-shadow: 0 4px 14px rgba(15, 23, 42, 0.055);
         }
         .watch-card-red {
             border-color: #f3cece;
@@ -376,14 +396,16 @@ def apply_dashboard_style() -> None:
             background: #fbfbfc;
         }
         .watch-card-label {
-            color: #5f6875;
-            font-size: 0.82rem;
-            margin-bottom: 6px;
+            color: var(--terminal-muted);
+            font-size: 0.75rem;
+            font-weight: 620;
+            margin-bottom: 5px;
         }
         .watch-card-value {
-            font-size: 1.08rem;
-            font-weight: 700;
+            font-size: 1.14rem;
+            font-weight: 760;
             line-height: 1.25;
+            word-break: break-word;
         }
         .tone-red { color: #d62728; }
         .tone-green { color: #118642; }
@@ -399,12 +421,12 @@ def apply_dashboard_style() -> None:
         .small-hint-ok { color: #1f8f4d; }
         .small-hint-muted { color: #6b7280; }
         .stButton > button {
-            border-radius: 6px;
+            border-radius: 8px;
             font-weight: 600;
         }
         @media (max-width: 900px) {
             .main .block-container {
-                padding: 0.85rem 0.75rem 1.5rem;
+                padding: 0.7rem 0.7rem 1.2rem;
             }
             h1 { font-size: 1.45rem; }
         }
@@ -416,10 +438,15 @@ def apply_dashboard_style() -> None:
 
 def main() -> None:
     """Render dashboard."""
-    st.set_page_config(page_title="A 股个股量化盯盘看板", layout="wide")
+    st.set_page_config(
+        page_title="A股智能量化盯盘系统 V5.9",
+        page_icon=":material/query_stats:",
+        layout="wide",
+    )
     apply_dashboard_style()
-    st.title("A 股个股量化盯盘看板")
-    st.caption("仅供辅助观察与风险复核，不构成交易建议。")
+    initialize_dashboard_state()
+    st.title("A股智能量化盯盘系统 V5.9")
+    st.caption("实时选股观察 · 风险复核 · 策略跟踪｜仅供辅助观察，不构成交易建议。")
 
     status = load_market_status()
     candidates = load_candidates()
@@ -427,7 +454,6 @@ def main() -> None:
     reference_candidates = load_reference_candidates()
     watchlist = load_auxiliary_csv(LATEST_WATCHLIST_PATH)
     holdings = load_auxiliary_csv(LATEST_HOLDINGS_PATH)
-    render_top_status(status)
     strategy_candidates = candidates[candidates["source_type"] == SOURCE_TYPE_STRATEGY]
     today_trade_pool, top50_source_count = build_today_trade_pool(
         v59_top50,
@@ -439,29 +465,42 @@ def main() -> None:
         candidates,
         reference_candidates,
     )
-    tabs = st.tabs(["今日交易候选池", "V5.9 Top50交易观察池", "策略候选池", "市场异动观察池", "数据参考池", "策略跟踪池", "自选股 / 持仓股", "板块与大盘", "个股详情", "策略统计"])
-    with tabs[0]:
-        render_today_trade_pool_tab(today_trade_pool, top50_source_count)
-    with tabs[1]:
-        render_v59_top50_tab(v59_top50, status)
-    with tabs[2]:
-        st.info("策略候选池：展示所有模型评分结果，用于观察。基础评分、交易质量评分和最终交易评分会分开显示；未进入全市场基础评分Top100的股票不计算交易质量。")
-        render_table_tab(strategy_candidates, "当前没有策略候选股。")
-    with tabs[3]:
-        render_active_watchlist_tab(candidates[candidates["source_type"] == SOURCE_TYPE_ACTIVE])
-    with tabs[4]:
-        render_reference_candidates_tab(reference_candidates)
-    with tabs[5]:
-        render_strategy_tracking_pool_tab()
-    with tabs[6]:
-        render_watchlist_holdings(watchlist, holdings, candidates)
-    with tabs[7]:
-        render_sector_market_tab(status, candidates)
-    with tabs[8]:
-        render_stock_detail_panel(detail_candidates, status)
-    with tabs[9]:
-        render_strategy_statistics_tab()
-    render_developer_diagnostics(status)
+    render_top_status(status, candidate_count=len(today_trade_pool))
+    tabs = st.tabs(
+        ["今日交易候选池", "V5.9 Top50交易观察池", "策略候选池", "策略跟踪池", "自选股 / 持仓股", "板块与大盘", "个股详情", "策略统计"],
+        key="main_dashboard_tabs",
+        on_change="rerun",
+    )
+    if tabs[0].open:
+        with tabs[0]:
+            render_today_trade_pool_tab(today_trade_pool, top50_source_count)
+    if tabs[1].open:
+        with tabs[1]:
+            render_v59_top50_tab(v59_top50, status)
+    if tabs[2].open:
+        with tabs[2]:
+            st.info("策略候选池：展示所有模型评分结果，用于观察。基础评分、交易质量评分和最终交易评分会分开显示；未进入全市场基础评分Top100的股票不计算交易质量。")
+            render_table_tab(strategy_candidates, "当前没有策略候选股。")
+    if tabs[3].open:
+        with tabs[3]:
+            render_strategy_tracking_pool_tab()
+    if tabs[4].open:
+        with tabs[4]:
+            render_watchlist_holdings(watchlist, holdings, candidates)
+    if tabs[5].open:
+        with tabs[5]:
+            render_sector_market_tab(status, candidates)
+    if tabs[6].open:
+        with tabs[6]:
+            render_stock_detail_panel(detail_candidates, status)
+    if tabs[7].open:
+        with tabs[7]:
+            render_strategy_statistics_tab()
+    render_developer_diagnostics(
+        status,
+        candidates[candidates["source_type"] == SOURCE_TYPE_ACTIVE],
+        reference_candidates,
+    )
 
 
 def load_candidates(
@@ -473,12 +512,19 @@ def load_candidates(
     data = load_auxiliary_csv(path, dtype={"code": "string"})
     if data.empty:
         return _empty_candidates()
-    for column in _candidate_columns():
-        if column not in data.columns:
-            data[column] = pd.NA
+    missing_columns = [column for column in _candidate_columns() if column not in data.columns]
+    if missing_columns:
+        placeholders = pd.DataFrame(
+            {column: pd.Series(pd.NA, index=data.index, dtype="object") for column in missing_columns},
+            index=data.index,
+        )
+        data = pd.concat([data, placeholders], axis=1)
     data["code"] = data["code"].astype("string").str.zfill(6)
     if attach_metric_samples:
         data = attach_realtime_metric_fields(data)
+    # Consolidate the wide CSV frame once before adding presentation columns.
+    # This avoids repeated single-column inserts fragmenting DataFrames on every rerun.
+    data = data.copy()
     data["source_type"] = data["source_type"].fillna(SOURCE_TYPE_ACTIVE).astype(str)
     data["source_type_display"] = data["source_type"].map(SOURCE_TYPE_LABELS).fillna(data["source_type_display"].fillna(data["source_type"]))
     data["strategy_names_display"] = data["strategy_names"].map(format_strategy_names)
@@ -508,7 +554,7 @@ def load_candidates(
     ).map(format_data_quality_level)
     for column in ["sector_name", "sector_strength_level", "theme_tags", "money_strength_level", "action_state_display", "position_risk_level", "t1_risk_level", "tracking_summary", "data_quality_status"]:
         data[column] = data[column].fillna("--").astype(str).replace({"": "--", "nan": "--"})
-    return data.sort_values("score", ascending=False).reset_index(drop=True)
+    return data.copy().sort_values("score", ascending=False).reset_index(drop=True)
 
 
 def load_v59_top50() -> pd.DataFrame:
@@ -622,25 +668,50 @@ def load_market_status(path: Path = LATEST_MARKET_STATUS_PATH) -> dict[str, Any]
     if not path.exists() or path.stat().st_size == 0:
         return {"data_status": "行情源失败", "errors": ["尚未生成 latest_market_status.json"]}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return payload
+        return {"data_status": "行情源失败", "errors": ["状态文件不是有效对象"]}
     except Exception as exc:
         return {"data_status": "行情源失败", "errors": [f"读取状态文件失败: {type(exc).__name__}: {exc}"]}
 
 
-def render_top_status(status: dict[str, Any]) -> None:
-    """Render top compact market status."""
-    market = status.get("market_environment_detail") or {}
+def initialize_dashboard_state() -> None:
+    """Initialize cross-page UI state once, with safe defaults for reruns."""
+    defaults = {
+        "selected_stock_code": "",
+        "detail_focus_requested": False,
+        "strategy_tracking_feedback": None,
+        "strategy_tracking_exit_tracking_id": "",
+        "watchlist_feedback": None,
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+
+def render_top_status(status: dict[str, Any], *, candidate_count: int) -> None:
+    """Render the professional top-line operational snapshot."""
+    raw_market = status.get("market_environment_detail")
+    market = raw_market if isinstance(raw_market, dict) else {}
     data_quality_level = str(status.get("data_quality_level") or "C").upper()
     data_quality_text = _data_quality_level_text(status)
-    cols = st.columns(7)
     market_env = str(status.get("market_environment", "--"))
-    render_status_card(cols[0], "当前数据源", str(status.get("data_source", "--")), "neutral")
-    render_status_card(cols[1], "当前数据质量", data_quality_text, "neutral")
-    render_status_card(cols[2], "市场环境", market_env, "red" if market_env in {"强势", "偏强"} else "green" if market_env in {"偏弱", "极弱"} else "neutral")
-    render_status_card(cols[3], "上涨家数", int(market.get("up_count") or 0), "red")
-    render_status_card(cols[4], "下跌家数", int(market.get("down_count") or 0), "green")
-    render_status_card(cols[5], "涨停家数", int(market.get("limit_up_count") or 0), "red")
-    render_status_card(cols[6], "跌停家数", int(market.get("limit_down_count") or 0), "green")
+    columns = st.columns(4)
+    render_status_card(columns[0], "数据更新时间", _format_dashboard_timestamp(status.get("scan_time")), "neutral")
+    render_status_card(columns[1], "当前数据源", str(status.get("data_source", "--")), "neutral")
+    render_status_card(
+        columns[2],
+        "市场状态",
+        market_env,
+        "red" if market_env in {"强势", "偏强"} else "green" if market_env in {"偏弱", "极弱"} else "neutral",
+    )
+    render_status_card(columns[3], "今日交易候选", format_quantity(candidate_count), "red" if candidate_count else "gray")
+    st.caption(
+        f"数据质量：{data_quality_text} ｜ 上涨 {format_quantity(market.get('up_count'))} ｜ "
+        f"下跌 {format_quantity(market.get('down_count'))} ｜ "
+        f"涨停 {format_quantity(market.get('limit_up_count'))} ｜ "
+        f"跌停 {format_quantity(market.get('limit_down_count'))}"
+    )
     if data_quality_level == "B":
         st.warning("当前换手率/量比来自计算，不是交易所实时字段。")
     elif data_quality_level == "C":
@@ -663,11 +734,13 @@ def render_status_card(container: Any, label: str, value: Any, tone: str = "neut
         "risk": "watch-card-risk",
         "neutral": "",
     }.get(tone, "")
+    safe_label = escape(str(label))
+    safe_value = escape(display_text(value))
     container.markdown(
         f"""
         <div class="watch-card {card_class}">
-            <div class="watch-card-label">{label}</div>
-            <div class="watch-card-value {tone_class}">{value}</div>
+            <div class="watch-card-label">{safe_label}</div>
+            <div class="watch-card-value {tone_class}">{safe_value}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -677,7 +750,7 @@ def render_status_card(container: Any, label: str, value: Any, tone: str = "neut
 def render_small_hint(message: str, tone: str = "muted") -> None:
     """Render compact inline feedback instead of a full alert block."""
     tone_class = "small-hint-ok" if tone == "ok" else "small-hint-muted"
-    st.markdown(f'<div class="small-hint {tone_class}">{message}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="small-hint {tone_class}">{escape(str(message))}</div>', unsafe_allow_html=True)
 
 
 def _data_source_mode_text(status: dict[str, Any]) -> str:
@@ -708,6 +781,14 @@ def _data_quality_level_text(status: dict[str, Any]) -> str:
     return str(status.get("data_quality_label") or labels.get(level, labels["C"]))
 
 
+def _format_dashboard_timestamp(value: Any) -> str:
+    """Display a valid scan timestamp compactly without assuming its format."""
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.notna(parsed):
+        return pd.Timestamp(parsed).strftime("%Y-%m-%d %H:%M")
+    return display_text(value)
+
+
 def _missing_realtime_turnover_or_ratio(status: dict[str, Any]) -> bool:
     return str(status.get("data_quality_level") or "C").upper() == "C"
 
@@ -723,7 +804,7 @@ def render_table_tab(data: pd.DataFrame, empty_text: str) -> None:
     render_compact_stock_dataframe(display_frame(shown))
     with st.expander("长文本风险提示 / 评分解释"):
         columns = [c for c in ["code", "name", "score_detail", "risk_summary", "turnover_summary", "sector_summary", "action_summary", "t1_risk_summary"] if c in shown.columns]
-        st.dataframe(shown[columns], use_container_width=True, hide_index=True)
+        st.dataframe(shown[columns], width="stretch", hide_index=True)
 
 
 def build_today_trade_pool(
@@ -1142,16 +1223,16 @@ def render_watchlist_holdings(watchlist: pd.DataFrame, holdings: pd.DataFrame, c
     st.subheader("自选股")
     user_watchlist = load_user_watchlist()
     if user_watchlist.empty:
-        st.info("暂无本地自选股。可以在“市场异动观察池”中选择个股后加入自选股。")
+        st.info("暂无本地自选股。可在“系统诊断 / 开发工具”中的市场异动观察池选择个股后加入自选股。")
     else:
-        st.dataframe(style_watch_table(format_user_watchlist_table(user_watchlist, candidates, watchlist)), use_container_width=True, hide_index=True)
+        st.dataframe(style_watch_table(format_user_watchlist_table(user_watchlist, candidates, watchlist)), width="stretch", hide_index=True)
         render_watchlist_editor(user_watchlist)
     st.subheader("持仓股")
     user_holdings = load_user_holdings()
     if user_holdings.empty:
         st.info("暂未配置持仓股。可在下方手动新增，本系统不会读取券商真实持仓。")
     else:
-        st.dataframe(style_watch_table(format_user_holdings_table(user_holdings, candidates, watchlist)), use_container_width=True, hide_index=True)
+        st.dataframe(style_watch_table(format_user_holdings_table(user_holdings, candidates, watchlist)), width="stretch", hide_index=True)
     render_holdings_editor(user_holdings, candidates, watchlist)
 
 
@@ -1174,51 +1255,54 @@ def render_strategy_tracking_pool_tab() -> None:
 
 
 def render_strategy_statistics_tab() -> None:
-    """Render historical validation statistics from local strategy-tracking CSV data."""
+    """Render local tracking-ledger and V5.9 candidate-snapshot statistics."""
     st.info(
         "策略统计：仅汇总策略跟踪池中已保存的价格、评分和结束记录，用于验证历史表现。"
         "已结束记录使用结束收益率；进行中记录使用当前收益率。"
+        "V5.9 历史候选池统计只读取本地候选快照和历史日线，不会重新评分。"
     )
     tracking_pool = load_strategy_tracking_pool()
     if tracking_pool.empty:
         st.info("暂无策略跟踪数据，加入并完成至少一轮扫描后即可生成统计。")
-        return
+    else:
+        statistics = build_strategy_tracking_statistics(tracking_pool)
+        overview = statistics["overview"]
+        cards = [
+            ("当前跟踪股票数量", str(overview["current_tracking_count"])),
+            ("已完成跟踪数量", str(overview["completed_tracking_count"])),
+            ("盈利数量", str(overview["profit_count"])),
+            ("亏损数量", str(overview["loss_count"])),
+            ("胜率", format_plain_percent(overview["win_rate"])),
+            ("平均收益率", format_change_percent(overview["average_return_pct"])),
+            ("最大盈利", format_change_percent(overview["max_profit_pct"])),
+            ("最大亏损", format_change_percent(overview["max_loss_pct"])),
+        ]
+        st.subheader("策略跟踪池表现")
+        for offset in range(0, len(cards), 3):
+            columns = st.columns(3)
+            for column, (label, value) in zip(columns, cards[offset : offset + 3]):
+                column.metric(label, value)
 
-    statistics = build_strategy_tracking_statistics(tracking_pool)
-    overview = statistics["overview"]
-    cards = [
-        ("当前跟踪股票数量", str(overview["current_tracking_count"])),
-        ("已完成跟踪数量", str(overview["completed_tracking_count"])),
-        ("盈利数量", str(overview["profit_count"])),
-        ("亏损数量", str(overview["loss_count"])),
-        ("胜率", format_plain_percent(overview["win_rate"])),
-        ("平均收益率", format_change_percent(overview["average_return_pct"])),
-        ("最大盈利", format_change_percent(overview["max_profit_pct"])),
-        ("最大亏损", format_change_percent(overview["max_loss_pct"])),
-    ]
-    for offset in range(0, len(cards), 3):
-        columns = st.columns(3)
-        for column, (label, value) in zip(columns, cards[offset : offset + 3]):
-            column.metric(label, value)
+        st.subheader("收益分布")
+        st.dataframe(pd.DataFrame(statistics["return_distribution"]), width="stretch", hide_index=True)
 
-    st.subheader("收益分布")
-    st.dataframe(pd.DataFrame(statistics["return_distribution"]), width="stretch", hide_index=True)
+        st.subheader("按加入评分统计")
+        st.caption("按加入时 V5.9 最终交易评分分组。")
+        st.dataframe(format_strategy_group_statistics(statistics["score_groups"]), width="stretch", hide_index=True)
 
-    st.subheader("按加入评分统计")
-    st.caption("按加入时 V5.9 最终交易评分分组。")
-    st.dataframe(format_strategy_group_statistics(statistics["score_groups"]), width="stretch", hide_index=True)
+        st.subheader("按换手率统计")
+        st.caption("按加入时换手率分组。")
+        st.dataframe(format_strategy_group_statistics(statistics["turnover_groups"]), width="stretch", hide_index=True)
 
-    st.subheader("按换手率统计")
-    st.caption("按加入时换手率分组。")
-    st.dataframe(format_strategy_group_statistics(statistics["turnover_groups"]), width="stretch", hide_index=True)
+        st.subheader("按量比统计")
+        st.caption("按加入时量比分组。")
+        st.dataframe(format_strategy_group_statistics(statistics["volume_ratio_groups"]), width="stretch", hide_index=True)
 
-    st.subheader("按量比统计")
-    st.caption("按加入时量比分组。")
-    st.dataframe(format_strategy_group_statistics(statistics["volume_ratio_groups"]), width="stretch", hide_index=True)
+        st.subheader("入选原因统计")
+        st.caption("标签基于加入策略跟踪时永久保存的入选快照，不会受后续行情更新影响。")
+        st.dataframe(format_strategy_reason_statistics(statistics["reason_groups"]), width="stretch", hide_index=True)
 
-    st.subheader("入选原因统计")
-    st.caption("标签基于加入策略跟踪时永久保存的入选快照，不会受后续行情更新影响。")
-    st.dataframe(format_strategy_reason_statistics(statistics["reason_groups"]), width="stretch", hide_index=True)
+    render_v59_historical_candidate_statistics()
 
 
 def format_strategy_group_statistics(rows: list[dict[str, Any]]) -> pd.DataFrame:
@@ -1239,6 +1323,732 @@ def format_strategy_reason_statistics(rows: list[dict[str, Any]]) -> pd.DataFram
     data["胜率"] = data["胜率"].map(format_plain_percent)
     data["平均收益率"] = data["平均收益率"].map(format_change_percent)
     return clean_display_frame(data)
+
+
+def render_v59_historical_candidate_statistics() -> None:
+    """Render offline V5.9 group statistics from immutable candidate snapshots."""
+    snapshot_version = _local_csv_version(V59_CANDIDATE_HISTORY_DIR, "v5_9_candidate_*.csv")
+    daily_version = _local_csv_version(HISTORICAL_DAILY_DIR, "daily_*.csv")
+    tracking_history_version = _local_csv_version(STRATEGY_TRACKING_HISTORY_PATH.parent, STRATEGY_TRACKING_HISTORY_PATH.name)
+    performance, coverage = load_v59_candidate_pool_performance(snapshot_version, daily_version)
+    tracking_history = load_strategy_tracking_history_summary(tracking_history_version)
+
+    st.subheader("V5.9 历史候选池验证")
+    st.caption(
+        "收益口径：使用候选池快照中的当日价格作为买入价，并以本地历史日线第 3、5、10 个后续交易日收盘价计算最终收益。"
+        "每个持有窗口同时统计最高价收益与相对买入价的最大回撤；评分、换手率和量比均直接读取快照，不重新计算。"
+    )
+    source_cards = [
+        ("候选池快照文件", str(coverage["snapshot_files"])),
+        ("总样本数", str(len(performance))),
+        ("3日收益样本", str(coverage["completed_rows"]["3"])),
+        ("5日收益样本", str(coverage["completed_rows"]["5"])),
+        ("10日收益样本", str(coverage["completed_rows"]["10"])),
+        ("策略跟踪历史快照", str(tracking_history["snapshot_rows"])),
+    ]
+    for offset in range(0, len(source_cards), 4):
+        columns = st.columns(4)
+        for column, (label, value) in zip(columns, source_cards[offset : offset + 4]):
+            column.metric(label, value)
+    if tracking_history["latest_snapshot_date"]:
+        st.caption(
+            f"策略跟踪历史已保存 {tracking_history['tracking_count']} 个跟踪对象，"
+            f"最新快照日期：{tracking_history['latest_snapshot_date']}。"
+        )
+
+    if coverage["snapshot_files"] == 0:
+        st.info("暂无 V5.9 每日候选池快照。后续成功运行 main.py --once 后将自动累积。")
+        return
+    if all(count == 0 for count in coverage["completed_rows"].values()):
+        st.info(
+            "已读取候选池快照，但 3/5/10 日收益样本均不足。"
+            f"缺少信号日历史：{coverage['missing_signal_date']}；"
+            f"3/5/10 日后续数据不足或收盘价缺失："
+            f"{coverage['missing_future_price']['3']}/{coverage['missing_future_price']['5']}/{coverage['missing_future_price']['10']}。"
+        )
+
+    render_v59_overall_return_summary(performance)
+    render_v59_strategy_effectiveness_analysis(performance)
+    render_v59_paper_trading_account(snapshot_version, daily_version)
+
+    st.subheader("按最终交易评分分组")
+    st.caption("final_trade_score：90–100、80–90、70–80、<70。“10个交易日”行的平均最终收益率即最终10日收益率。")
+    st.dataframe(
+        format_v59_historical_group_statistics(v59_historical_group_statistics(performance, "final_trade_score")),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.subheader("按换手率分组")
+    st.caption("turnover_rate：<5%、5%–10%、10%–20%、20%–40%、>40%。")
+    st.dataframe(
+        format_v59_historical_group_statistics(v59_historical_group_statistics(performance, "turnover_rate")),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.subheader("按量比分组")
+    st.caption("volume_ratio：<1、1–2、2–5、>5。")
+    st.dataframe(
+        format_v59_historical_group_statistics(v59_historical_group_statistics(performance, "volume_ratio")),
+        width="stretch",
+        hide_index=True,
+    )
+
+    with st.expander("逐只候选池收益记录", expanded=False):
+        st.caption("记录直接来自每日候选池快照；收益为入选日收盘价买入后第 3、5、10 个交易日的收盘收益。")
+        st.dataframe(
+            format_v59_candidate_performance_table(performance),
+            width="stretch",
+            hide_index=True,
+        )
+
+
+def _local_csv_version(directory: Path, pattern: str) -> tuple[tuple[str, int, int], ...]:
+    """Build a lightweight cache key from local immutable-report files."""
+    if not directory.exists():
+        return ()
+    return tuple(
+        (file_path.name, file_path.stat().st_mtime_ns, file_path.stat().st_size)
+        for file_path in sorted(directory.glob(pattern))
+        if file_path.is_file()
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def load_v59_paper_trading_account(
+    snapshot_version: tuple[tuple[str, int, int], ...],
+    daily_version: tuple[tuple[str, int, int], ...],
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], dict[str, Any]]:
+    """Load a cached, local-only V5.9 top-five paper-account simulation."""
+    del snapshot_version, daily_version  # Cache inputs intentionally track local source-file changes.
+    return run_v59_paper_account(
+        PaperAccountConfig(
+            candidate_dir=V59_CANDIDATE_HISTORY_DIR,
+            daily_dir=HISTORICAL_DAILY_DIR,
+        )
+    )
+
+
+def render_v59_paper_trading_account(
+    snapshot_version: tuple[tuple[str, int, int], ...],
+    daily_version: tuple[tuple[str, int, int], ...],
+) -> None:
+    """Render the offline account without creating any real trading action."""
+    trades, equity_curve, summary, coverage = load_v59_paper_trading_account(snapshot_version, daily_version)
+    st.subheader("V5.9 模拟交易账户")
+    st.caption(
+        "纯历史模拟：每日收盘按最终交易评分买入前 5 只，持有 5 个后续交易日收盘卖出。"
+        "初始净值为 100，采用五日滚动仓位；每只股票占初始净值的 4%。"
+        "不连接券商、不发送订单、不使用真实资金；未计手续费、滑点和税费。"
+    )
+
+    cards = [
+        ("完成模拟交易", str(summary["trade_count"])),
+        ("5日平均收益", format_change_percent(summary["average_return_pct"])),
+        ("5日胜率", format_plain_percent(summary["win_rate_pct"])),
+        ("最大回撤", format_change_percent(summary["max_drawdown_pct"])),
+        ("期末净值", _format_paper_net_value(summary["final_net_value"])),
+    ]
+    for column, (label, value) in zip(st.columns(5), cards):
+        column.metric(label, value)
+
+    if trades.empty or equity_curve.empty:
+        st.info(
+            "当前候选池与本地日线尚不足以完成 5 日模拟交易。"
+            f"候选池交易日：{coverage['candidate_pool_dates']}；"
+            f"已选信号：{coverage['selected_rows']}；"
+            f"后续日线不足：{coverage['insufficient_future_history']}；"
+            f"价格缺失：{coverage['missing_price_history']}。"
+        )
+        return
+
+    st.markdown("**资金曲线（归一化净值）**")
+    st.line_chart(
+        equity_curve.set_index("date")[["net_value"]],
+        height=240,
+    )
+    with st.expander("模拟交易明细", expanded=False):
+        st.dataframe(
+            format_v59_paper_trade_table(trades),
+            width="stretch",
+            hide_index=True,
+        )
+
+
+def format_v59_paper_trade_table(trades: pd.DataFrame) -> pd.DataFrame:
+    """Format paper-account trades without modifying their simulated values."""
+    output = trades.copy().rename(
+        columns={
+            "code": "股票代码",
+            "buy_date": "买入日期",
+            "exit_date": "卖出日期",
+            "buy_price": "买入价格",
+            "exit_price": "卖出价格",
+            "buy_score": "买入评分",
+            "return_5d": "5日收益率",
+            "allocation_pct": "初始资金占比",
+            "candidate_source": "候选池快照",
+        }
+    )
+    for column in ("买入日期", "卖出日期"):
+        output[column] = pd.to_datetime(output[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    output["股票代码"] = output["股票代码"].map(
+        lambda value: display_text(value).zfill(6) if display_text(value) != "--" else "--"
+    )
+    output["买入价格"] = output["买入价格"].map(format_price)
+    output["卖出价格"] = output["卖出价格"].map(format_price)
+    output["买入评分"] = output["买入评分"].map(_format_v59_numeric_score)
+    output["5日收益率"] = output["5日收益率"].map(format_change_percent)
+    output["初始资金占比"] = output["初始资金占比"].map(format_plain_percent)
+    return clean_display_frame(output)
+
+
+def _format_paper_net_value(value: Any) -> str:
+    """Present the normalized, non-monetary paper-account net value."""
+    number = pd.to_numeric(value, errors="coerce")
+    return "--" if pd.isna(number) else f"{float(number):.2f}"
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def load_v59_candidate_pool_performance(
+    snapshot_version: tuple[tuple[str, int, int], ...],
+    daily_version: tuple[tuple[str, int, int], ...],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Calculate offline 3/5/10-day returns without querying or re-scoring."""
+    del snapshot_version, daily_version  # Cache inputs intentionally track local-file changes.
+    snapshot_files = sorted(V59_CANDIDATE_HISTORY_DIR.glob("v5_9_candidate_*.csv"))
+    coverage = {
+        "snapshot_files": len(snapshot_files),
+        "candidate_rows": 0,
+        "completed_rows": {str(days): 0 for days in V59_PERFORMANCE_HOLDING_DAYS},
+        "missing_signal_date": 0,
+        "missing_future_price": {str(days): 0 for days in V59_PERFORMANCE_HOLDING_DAYS},
+    }
+    frames: list[pd.DataFrame] = []
+    for file_path in snapshot_files:
+        try:
+            data = pd.read_csv(file_path, dtype={"code": "string"})
+        except Exception:
+            continue
+        coverage["candidate_rows"] += len(data)
+        required = {"code", "trade_date", "price", "final_trade_score", "turnover_rate", "volume_ratio"}
+        if data.empty or not required.issubset(data.columns):
+            continue
+        frame = data.reindex(
+            columns=[
+                "code",
+                "name",
+                "trade_date",
+                "price",
+                "final_trade_score",
+                "turnover_rate",
+                "volume_ratio",
+            ]
+        ).copy()
+        frame["code"] = _normalize_history_codes(frame["code"])
+        frame["signal_date"] = pd.to_datetime(frame["trade_date"], errors="coerce").dt.normalize()
+        for column in ("price", "final_trade_score", "turnover_rate", "volume_ratio"):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame[(frame["code"] != "") & frame["signal_date"].notna() & (frame["price"] > 0)]
+        if not frame.empty:
+            frames.append(frame)
+
+    if not frames:
+        return _empty_v59_performance_frame(), coverage
+    candidates = pd.concat(frames, ignore_index=True)
+    candidates["sample_id"] = pd.RangeIndex(len(candidates), dtype="int64")
+    daily_files = _daily_history_files_by_date()
+    trading_dates = sorted(daily_files)
+    date_positions = {trade_date: index for index, trade_date in enumerate(trading_dates)}
+    for days in V59_PERFORMANCE_HOLDING_DAYS:
+        candidates[f"exit_date_{days}d"] = pd.NaT
+    for index, signal_date in candidates["signal_date"].items():
+        position = date_positions.get(signal_date)
+        if position is None:
+            coverage["missing_signal_date"] += 1
+            continue
+        for days in V59_PERFORMANCE_HOLDING_DAYS:
+            if position + days >= len(trading_dates):
+                coverage["missing_future_price"][str(days)] += 1
+                continue
+            candidates.at[index, f"exit_date_{days}d"] = trading_dates[position + days]
+
+    price_requests: list[pd.DataFrame] = []
+    for days in V59_PERFORMANCE_HOLDING_DAYS:
+        exit_date_column = f"exit_date_{days}d"
+        request = candidates.loc[candidates[exit_date_column].notna(), ["code", exit_date_column]].rename(
+            columns={exit_date_column: "exit_date"}
+        )
+        if not request.empty:
+            price_requests.append(request)
+    exit_prices = _load_v59_exit_prices(
+        pd.concat(price_requests, ignore_index=True).drop_duplicates(["code", "exit_date"])
+        if price_requests
+        else pd.DataFrame(columns=["code", "exit_date"]),
+        daily_files,
+    )
+    for days in V59_PERFORMANCE_HOLDING_DAYS:
+        exit_date_column = f"exit_date_{days}d"
+        exit_price_column = f"exit_close_{days}d"
+        candidates = candidates.merge(
+            exit_prices.rename(columns={"exit_date": exit_date_column, "exit_close": exit_price_column}),
+            on=["code", exit_date_column],
+            how="left",
+        )
+        return_column = f"return_{days}d"
+        candidates[return_column] = (candidates[exit_price_column] / candidates["price"] - 1) * 100
+        valid_exit_date = candidates[exit_date_column].notna()
+        missing_prices = valid_exit_date & candidates[return_column].isna()
+        coverage["missing_future_price"][str(days)] += int(missing_prices.sum())
+        coverage["completed_rows"][str(days)] = int(candidates[return_column].notna().sum())
+    holding_extremes = _load_v59_holding_extremes(candidates, daily_files, date_positions, trading_dates)
+    for days in V59_PERFORMANCE_HOLDING_DAYS:
+        period = holding_extremes[holding_extremes["holding_days"] == days].rename(
+            columns={
+                "period_high": f"period_high_{days}d",
+                "period_low": f"period_low_{days}d",
+            }
+        )
+        candidates = candidates.merge(
+            period[["sample_id", f"period_high_{days}d", f"period_low_{days}d"]],
+            on="sample_id",
+            how="left",
+        )
+        high_return_column = f"highest_return_{days}d"
+        drawdown_column = f"max_drawdown_{days}d"
+        candidates[high_return_column] = (candidates[f"period_high_{days}d"] / candidates["price"] - 1) * 100
+        raw_drawdown = (candidates[f"period_low_{days}d"] / candidates["price"] - 1) * 100
+        candidates[drawdown_column] = raw_drawdown.clip(upper=0)
+    return candidates.reset_index(drop=True), coverage
+
+
+def _daily_history_files_by_date() -> dict[pd.Timestamp, Path]:
+    """Map only locally cached trading days; no network fallback is allowed."""
+    files: dict[pd.Timestamp, Path] = {}
+    for file_path in HISTORICAL_DAILY_DIR.glob("daily_*.csv"):
+        matched = re.search(r"daily_(\d{8})$", file_path.stem)
+        if not matched:
+            continue
+        trade_date = pd.to_datetime(matched.group(1), format="%Y%m%d", errors="coerce")
+        if pd.notna(trade_date):
+            files[pd.Timestamp(trade_date).normalize()] = file_path
+    return files
+
+
+def _load_v59_exit_prices(candidates: pd.DataFrame, daily_files: dict[pd.Timestamp, Path]) -> pd.DataFrame:
+    """Read only the needed local future-day close files for the candidate rows."""
+    frames: list[pd.DataFrame] = []
+    for exit_date, day_candidates in candidates.groupby("exit_date", sort=True):
+        file_path = daily_files.get(pd.Timestamp(exit_date).normalize())
+        if file_path is None:
+            continue
+        try:
+            daily = pd.read_csv(file_path, usecols=["ts_code", "close"])
+        except Exception:
+            continue
+        daily["code"] = _normalize_history_codes(daily["ts_code"])
+        daily["exit_close"] = pd.to_numeric(daily["close"], errors="coerce")
+        codes = set(day_candidates["code"].astype(str))
+        daily = daily[daily["code"].isin(codes) & (daily["exit_close"] > 0)]
+        if not daily.empty:
+            daily["exit_date"] = pd.Timestamp(exit_date).normalize()
+            frames.append(daily[["code", "exit_date", "exit_close"]])
+    if not frames:
+        return pd.DataFrame(
+            {
+                "code": pd.Series(dtype="string"),
+                "exit_date": pd.Series(dtype="datetime64[ns]"),
+                "exit_close": pd.Series(dtype="float64"),
+            }
+        )
+    return pd.concat(frames, ignore_index=True).drop_duplicates(["code", "exit_date"], keep="last")
+
+
+def _load_v59_holding_extremes(
+    candidates: pd.DataFrame,
+    daily_files: dict[pd.Timestamp, Path],
+    date_positions: dict[pd.Timestamp, int],
+    trading_dates: list[pd.Timestamp],
+) -> pd.DataFrame:
+    """Read only local high/low bars needed for each 3/5/10-day holding window."""
+    requests: list[dict[str, Any]] = []
+    for row in candidates.itertuples(index=False):
+        signal_date = pd.Timestamp(row.signal_date).normalize()
+        position = date_positions.get(signal_date)
+        if position is None:
+            continue
+        for days in V59_PERFORMANCE_HOLDING_DAYS:
+            if pd.isna(getattr(row, f"exit_date_{days}d")):
+                continue
+            for bar_date in trading_dates[position + 1 : position + days + 1]:
+                requests.append(
+                    {
+                        "sample_id": row.sample_id,
+                        "code": row.code,
+                        "holding_days": days,
+                        "bar_date": bar_date,
+                    }
+                )
+    if not requests:
+        return _empty_v59_holding_extremes()
+
+    requested = pd.DataFrame(requests)
+    bar_frames: list[pd.DataFrame] = []
+    for bar_date, day_requests in requested.groupby("bar_date", sort=True):
+        file_path = daily_files.get(pd.Timestamp(bar_date).normalize())
+        if file_path is None:
+            continue
+        try:
+            bars = pd.read_csv(file_path, usecols=["ts_code", "high", "low"])
+        except Exception:
+            continue
+        bars["code"] = _normalize_history_codes(bars["ts_code"])
+        bars["high"] = pd.to_numeric(bars["high"], errors="coerce")
+        bars["low"] = pd.to_numeric(bars["low"], errors="coerce")
+        codes = set(day_requests["code"].astype(str))
+        bars = bars[bars["code"].isin(codes) & (bars["high"] > 0) & (bars["low"] > 0)]
+        if not bars.empty:
+            bars["bar_date"] = pd.Timestamp(bar_date).normalize()
+            bar_frames.append(bars[["code", "bar_date", "high", "low"]])
+    if not bar_frames:
+        return _empty_v59_holding_extremes()
+
+    windows = requested.merge(
+        pd.concat(bar_frames, ignore_index=True).drop_duplicates(["code", "bar_date"], keep="last"),
+        on=["code", "bar_date"],
+        how="left",
+    )
+    return (
+        windows.groupby(["sample_id", "holding_days"], as_index=False)
+        .agg(period_high=("high", "max"), period_low=("low", "min"))
+    )
+
+
+def _empty_v59_holding_extremes() -> pd.DataFrame:
+    """Return a stable empty schema for unavailable local high/low windows."""
+    return pd.DataFrame(
+        {
+            "sample_id": pd.Series(dtype="int64"),
+            "holding_days": pd.Series(dtype="int64"),
+            "period_high": pd.Series(dtype="float64"),
+            "period_low": pd.Series(dtype="float64"),
+        }
+    )
+
+
+def _normalize_history_codes(values: pd.Series) -> pd.Series:
+    """Normalize six-digit codes shared by candidate and historical-bar caches."""
+    codes = values.astype("string").fillna("").str.extract(r"(\d{6})", expand=False).fillna("")
+    return codes.astype("string")
+
+
+def _empty_v59_performance_frame() -> pd.DataFrame:
+    """Return a stable, empty offline-performance schema."""
+    return pd.DataFrame(
+        {
+            "code": pd.Series(dtype="string"),
+            "name": pd.Series(dtype="string"),
+            "signal_date": pd.Series(dtype="datetime64[ns]"),
+            "price": pd.Series(dtype="float64"),
+            "final_trade_score": pd.Series(dtype="float64"),
+            "turnover_rate": pd.Series(dtype="float64"),
+            "volume_ratio": pd.Series(dtype="float64"),
+            **{
+                f"exit_date_{days}d": pd.Series(dtype="datetime64[ns]")
+                for days in V59_PERFORMANCE_HOLDING_DAYS
+            },
+            **{
+                f"exit_close_{days}d": pd.Series(dtype="float64")
+                for days in V59_PERFORMANCE_HOLDING_DAYS
+            },
+            **{
+                f"return_{days}d": pd.Series(dtype="float64")
+                for days in V59_PERFORMANCE_HOLDING_DAYS
+            },
+            **{
+                f"period_high_{days}d": pd.Series(dtype="float64")
+                for days in V59_PERFORMANCE_HOLDING_DAYS
+            },
+            **{
+                f"period_low_{days}d": pd.Series(dtype="float64")
+                for days in V59_PERFORMANCE_HOLDING_DAYS
+            },
+            **{
+                f"highest_return_{days}d": pd.Series(dtype="float64")
+                for days in V59_PERFORMANCE_HOLDING_DAYS
+            },
+            **{
+                f"max_drawdown_{days}d": pd.Series(dtype="float64")
+                for days in V59_PERFORMANCE_HOLDING_DAYS
+            },
+        }
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def load_strategy_tracking_history_summary(
+    history_version: tuple[tuple[str, int, int], ...],
+) -> dict[str, Any]:
+    """Summarize existing local tracking snapshots for data-source traceability."""
+    del history_version  # The version argument invalidates cached local CSV reads.
+    empty = {"snapshot_rows": 0, "tracking_count": 0, "latest_snapshot_date": ""}
+    if not STRATEGY_TRACKING_HISTORY_PATH.exists():
+        return empty
+    try:
+        data = pd.read_csv(STRATEGY_TRACKING_HISTORY_PATH, dtype={"tracking_id": "string"})
+    except Exception:
+        return empty
+    if data.empty:
+        return empty
+    dates = pd.to_datetime(data.get("snapshot_date"), errors="coerce")
+    return {
+        "snapshot_rows": int(len(data)),
+        "tracking_count": int(data.get("tracking_id", pd.Series(dtype="string")).dropna().nunique()),
+        "latest_snapshot_date": dates.max().date().isoformat() if dates.notna().any() else "",
+    }
+
+
+def v59_historical_group_statistics(performance: pd.DataFrame, field: str) -> pd.DataFrame:
+    """Aggregate existing 3/5/10-day returns by one immutable snapshot field."""
+    rules = _v59_historical_group_rules(field)
+    values = pd.to_numeric(performance.get(field, pd.Series(dtype="float64")), errors="coerce")
+    rows: list[dict[str, Any]] = []
+    for days in V59_PERFORMANCE_HOLDING_DAYS:
+        returns = pd.to_numeric(performance.get(f"return_{days}d", pd.Series(dtype="float64")), errors="coerce")
+        highest_returns = pd.to_numeric(
+            performance.get(f"highest_return_{days}d", pd.Series(dtype="float64")),
+            errors="coerce",
+        )
+        max_drawdowns = pd.to_numeric(
+            performance.get(f"max_drawdown_{days}d", pd.Series(dtype="float64")),
+            errors="coerce",
+        )
+        for label, matches in rules:
+            group_mask = _v59_boolean_mask(matches(values))
+            completed_mask = group_mask & returns.notna()
+            group_returns = returns[completed_mask]
+            group_highest_returns = highest_returns[completed_mask & highest_returns.notna()]
+            group_max_drawdowns = max_drawdowns[completed_mask & max_drawdowns.notna()]
+            sample_count = int(len(group_returns))
+            rows.append(
+                {
+                    "持有周期": f"{days}个交易日",
+                    "分组": label,
+                    "样本数量": sample_count,
+                    "盈利数量": int((group_returns > 0).sum()),
+                    "胜率": float((group_returns > 0).mean() * 100) if sample_count else pd.NA,
+                    "平均最终收益率": float(group_returns.mean()) if sample_count else pd.NA,
+                    "平均最高收益": float(group_highest_returns.mean()) if not group_highest_returns.empty else pd.NA,
+                    "平均最大回撤": float(group_max_drawdowns.mean()) if not group_max_drawdowns.empty else pd.NA,
+                    "最大收益": float(group_returns.max()) if sample_count else pd.NA,
+                    "最大亏损": float(group_returns.min()) if sample_count else pd.NA,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _v59_historical_group_rules(field: str) -> list[tuple[str, Any]]:
+    """Return the fixed snapshot group definitions shared by V5.9 reports."""
+    rules = {
+        "final_trade_score": [
+            ("90-100", lambda value: value >= 90),
+            ("80-90", lambda value: (value >= 80) & (value < 90)),
+            ("70-80", lambda value: (value >= 70) & (value < 80)),
+            ("<70", lambda value: value < 70),
+        ],
+        "turnover_rate": [
+            ("<5%", lambda value: value < 5),
+            ("5%-10%", lambda value: (value >= 5) & (value < 10)),
+            ("10%-20%", lambda value: (value >= 10) & (value < 20)),
+            ("20%-40%", lambda value: (value >= 20) & (value <= 40)),
+            (">40%", lambda value: value > 40),
+        ],
+        "volume_ratio": [
+            ("<1", lambda value: value < 1),
+            ("1-2", lambda value: (value >= 1) & (value < 2)),
+            ("2-5", lambda value: (value >= 2) & (value <= 5)),
+            (">5", lambda value: value > 5),
+        ],
+    }
+    if field not in rules:
+        raise ValueError(f"Unsupported V5.9 historical group field: {field}")
+    return rules[field]
+
+
+def _v59_boolean_mask(values: pd.Series) -> pd.Series:
+    """Normalize nullable pandas comparison results before row filtering."""
+    return values.fillna(False).astype(bool)
+
+
+def render_v59_overall_return_summary(performance: pd.DataFrame) -> None:
+    """Render the requested all-sample return summary without changing signals."""
+    st.subheader("整体收益表现")
+    st.caption("按全部有效候选样本汇总；各持有周期仅统计已具备对应后续收盘价的记录。")
+    st.dataframe(
+        format_v59_overall_return_statistics(v59_overall_return_statistics(performance)),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def v59_overall_return_statistics(performance: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate completed local candidate-pool returns for each holding period."""
+    rows: list[dict[str, Any]] = []
+    for days in V59_PERFORMANCE_HOLDING_DAYS:
+        returns = pd.to_numeric(performance.get(f"return_{days}d", pd.Series(dtype="float64")), errors="coerce")
+        completed_returns = returns[returns.notna()]
+        sample_count = int(len(completed_returns))
+        rows.append(
+            {
+                "持有周期": f"{days}个交易日",
+                "样本数量": sample_count,
+                "盈利数量": int((completed_returns > 0).sum()),
+                "胜率": float((completed_returns > 0).mean() * 100) if sample_count else pd.NA,
+                "平均收益": float(completed_returns.mean()) if sample_count else pd.NA,
+                "最大收益": float(completed_returns.max()) if sample_count else pd.NA,
+                "最大亏损": float(completed_returns.min()) if sample_count else pd.NA,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def format_v59_overall_return_statistics(data: pd.DataFrame) -> pd.DataFrame:
+    """Format all-sample V5.9 return statistics for the strategy page."""
+    output = data.copy()
+    output["统计状态"] = output["样本数量"].map(
+        lambda count: "样本不足" if pd.isna(count) or int(count) < 3 else "已统计"
+    )
+    output["胜率"] = output["胜率"].map(format_plain_percent)
+    for column in ("平均收益", "最大收益", "最大亏损"):
+        output[column] = output[column].map(format_change_percent)
+    return clean_display_frame(output)
+
+
+def format_v59_candidate_performance_table(performance: pd.DataFrame) -> pd.DataFrame:
+    """Present immutable per-stock snapshot fields alongside local holding returns."""
+    columns = [
+        "code",
+        "name",
+        "signal_date",
+        "price",
+        "final_trade_score",
+        "turnover_rate",
+        "volume_ratio",
+        "return_3d",
+        "return_5d",
+        "return_10d",
+    ]
+    output = performance.reindex(columns=columns).copy().rename(
+        columns={
+            "code": "股票代码",
+            "name": "股票名称",
+            "signal_date": "入选日期",
+            "price": "入选价格",
+            "final_trade_score": "最终交易评分",
+            "turnover_rate": "换手率",
+            "volume_ratio": "量比",
+            "return_3d": "3日收益率",
+            "return_5d": "5日收益率",
+            "return_10d": "10日收益率",
+        }
+    )
+    output["入选日期"] = pd.to_datetime(output["入选日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+    output["股票代码"] = output["股票代码"].map(lambda value: display_text(value).zfill(6) if display_text(value) != "--" else "--")
+    output["股票名称"] = output["股票名称"].map(display_text)
+    output["入选价格"] = output["入选价格"].map(format_price)
+    output["最终交易评分"] = output["最终交易评分"].map(_format_v59_numeric_score)
+    output["换手率"] = output["换手率"].map(format_change_percent)
+    output["量比"] = output["量比"].map(_format_v59_ratio)
+    for column in ("3日收益率", "5日收益率", "10日收益率"):
+        output[column] = output[column].map(format_change_percent)
+    return clean_display_frame(output)
+
+
+def _format_v59_numeric_score(value: Any) -> str:
+    """Format a score for historical display without applying score labels."""
+    number = pd.to_numeric(value, errors="coerce")
+    return "--" if pd.isna(number) else f"{float(number):.2f}"
+
+
+def _format_v59_ratio(value: Any) -> str:
+    """Format a raw volume ratio without treating it as a percentage."""
+    number = pd.to_numeric(value, errors="coerce")
+    return "--" if pd.isna(number) else f"{float(number):.2f}"
+
+
+def render_v59_strategy_effectiveness_analysis(performance: pd.DataFrame) -> None:
+    """Show compact V5.9 effectiveness tables from immutable local snapshots."""
+    score_statistics = v59_strategy_effectiveness_statistics(performance, "final_trade_score")
+    turnover_statistics = v59_strategy_effectiveness_statistics(performance, "turnover_rate")
+
+    st.subheader("策略有效性分析")
+    st.caption(
+        "总样本为具备代码、日期和买入价的本地候选池快照记录。各持有期胜率和平均收益仅使用该持有期已具备后续收盘价的样本。"
+    )
+    st.metric("总样本数量", str(len(performance)))
+
+    st.markdown("**按最终交易评分区间**")
+    st.dataframe(
+        format_v59_score_effectiveness_statistics(score_statistics),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.markdown("**按换手率区间（5日表现）**")
+    st.dataframe(
+        format_v59_turnover_effectiveness_statistics(turnover_statistics),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def v59_strategy_effectiveness_statistics(performance: pd.DataFrame, field: str) -> pd.DataFrame:
+    """Aggregate per-horizon effectiveness without recalculating scores or signals."""
+    values = pd.to_numeric(performance.get(field, pd.Series(dtype="float64")), errors="coerce")
+    rows: list[dict[str, Any]] = []
+    for label, matches in _v59_historical_group_rules(field):
+        group_mask = _v59_boolean_mask(matches(values))
+        row: dict[str, Any] = {
+            "分组": label,
+            "样本数量": int(group_mask.sum()),
+        }
+        for days in V59_PERFORMANCE_HOLDING_DAYS:
+            returns = pd.to_numeric(performance.get(f"return_{days}d", pd.Series(dtype="float64")), errors="coerce")
+            completed_returns = returns[group_mask & returns.notna()]
+            sample_count = int(len(completed_returns))
+            row[f"{days}日胜率"] = (
+                float((completed_returns > 0).mean() * 100) if sample_count else pd.NA
+            )
+            row[f"{days}日平均收益"] = float(completed_returns.mean()) if sample_count else pd.NA
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def format_v59_score_effectiveness_statistics(data: pd.DataFrame) -> pd.DataFrame:
+    """Format score-band effectiveness values while keeping each horizon explicit."""
+    output = data.copy()
+    for days in V59_PERFORMANCE_HOLDING_DAYS:
+        output[f"{days}日胜率"] = output[f"{days}日胜率"].map(format_plain_percent)
+        output[f"{days}日平均收益"] = output[f"{days}日平均收益"].map(format_change_percent)
+    return clean_display_frame(output)
+
+
+def format_v59_turnover_effectiveness_statistics(data: pd.DataFrame) -> pd.DataFrame:
+    """Keep the turnover effectiveness table focused on the requested 5-day result."""
+    output = data[["分组", "样本数量", "5日胜率", "5日平均收益"]].copy()
+    output["5日胜率"] = output["5日胜率"].map(format_plain_percent)
+    output["5日平均收益"] = output["5日平均收益"].map(format_change_percent)
+    return clean_display_frame(output)
+
+
+def format_v59_historical_group_statistics(data: pd.DataFrame) -> pd.DataFrame:
+    """Format offline V5.9 group statistics for presentation only."""
+    output = data.copy()
+    output["统计状态"] = output["样本数量"].map(lambda count: "样本不足" if pd.isna(count) or int(count) < 3 else "已统计")
+    for column in ("胜率", "平均最终收益率", "平均最高收益", "平均最大回撤", "最大收益", "最大亏损"):
+        output[column] = output[column].map(format_change_percent if column != "胜率" else format_plain_percent)
+    return clean_display_frame(output)
 
 
 def render_strategy_tracking_exit_action_table(
@@ -1528,7 +2338,7 @@ def render_pct_distribution(data: pd.DataFrame) -> None:
         )
         .properties(height=260)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def render_rank_table(data: pd.DataFrame) -> None:
@@ -1538,13 +2348,14 @@ def render_rank_table(data: pd.DataFrame) -> None:
         return
     columns = [column for column in ["code", "name", "pct_chg_display", "amount_display", "tracking_summary", "risk_summary"] if column in data.columns]
     output = data[columns].rename(columns=COLUMN_LABELS)
-    st.dataframe(style_watch_table(clean_display_frame(output)), use_container_width=True, hide_index=True)
+    st.dataframe(style_watch_table(clean_display_frame(output)), width="stretch", hide_index=True)
 
 
 def render_sector_market_tab(status: dict[str, Any], candidates: pd.DataFrame) -> None:
     """Render sector strength and market environment."""
     st.subheader("大盘环境")
-    market = status.get("market_environment_detail") or {}
+    raw_market = status.get("market_environment_detail")
+    market = raw_market if isinstance(raw_market, dict) else {}
     cols = st.columns(6)
     market_env = str(status.get("market_environment", "--"))
     render_status_card(cols[0], "市场环境", market_env, "red" if market_env in {"强势", "偏强"} else "green" if market_env in {"偏弱", "极弱"} else "neutral")
@@ -1555,9 +2366,10 @@ def render_sector_market_tab(status: dict[str, Any], candidates: pd.DataFrame) -
     render_status_card(cols[5], "下跌占比", format_percent(market.get("down_ratio")), "green")
     index_rows = market.get("index_quotes") or []
     if index_rows:
-        st.dataframe(pd.DataFrame(index_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(index_rows), width="stretch", hide_index=True)
     st.subheader("板块强度")
-    sector = status.get("sector_strength") or {}
+    raw_sector = status.get("sector_strength")
+    sector = raw_sector if isinstance(raw_sector, dict) else {}
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("##### 强势行业板块前 10")
@@ -1568,9 +2380,22 @@ def render_sector_market_tab(status: dict[str, Any], candidates: pd.DataFrame) -
     render_market_rankings(candidates)
 
 
-def render_developer_diagnostics(status: dict[str, Any]) -> None:
-    """Render concise source health only when the user opens diagnostics."""
-    with st.expander("开发诊断 / 数据源状态", expanded=False):
+def render_developer_diagnostics(
+    status: dict[str, Any],
+    active_watchlist: pd.DataFrame,
+    reference_candidates: pd.DataFrame,
+) -> None:
+    """Render source diagnostics and opt-in access to secondary data pools."""
+    diagnostics = st.expander(
+        "系统诊断 / 开发工具",
+        expanded=False,
+        icon=":material/developer_mode:",
+        key="developer_diagnostics",
+        on_change="rerun",
+    )
+    if not diagnostics.open:
+        return
+    with diagnostics:
         cols = st.columns(3)
         cols[0].metric("扫描时间", str(status.get("scan_time", "--")))
         cols[1].metric("当前数据源", str(status.get("data_source", "--")))
@@ -1587,6 +2412,19 @@ def render_developer_diagnostics(status: dict[str, Any]) -> None:
                 st.write(f"- {reason}")
         else:
             st.write("暂无明显异常。")
+
+        st.divider()
+        st.markdown("**隐藏数据池入口**")
+        st.caption("以下页面保留原有展示与交互，仅从主导航移入开发工具，不参与交易候选生成。")
+        selected_pool = st.selectbox(
+            "选择数据池",
+            ["不显示", "市场异动观察池", "数据参考池"],
+            key="developer_hidden_data_pool",
+        )
+        if selected_pool == "市场异动观察池":
+            render_active_watchlist_tab(active_watchlist)
+        elif selected_pool == "数据参考池":
+            render_reference_candidates_tab(reference_candidates)
 
 
 def _yes_no(value: Any) -> str:
@@ -1879,7 +2717,7 @@ def render_tushare_kline_or_trend(row: pd.Series, data: pd.DataFrame) -> None:
             row=2,
             col=1,
         )
-        st.plotly_chart(figure, use_container_width=True)
+        st.plotly_chart(figure, width="stretch")
     except Exception:
         if has_ohlc:
             fallback_data = data.copy()
@@ -1945,10 +2783,10 @@ def render_tushare_kline_or_trend(row: pd.Series, data: pd.DataFrame) -> None:
                 ).properties(height=180)
                 st.altair_chart(
                     alt.vconcat(kline_chart, volume_chart, spacing=4).resolve_scale(x="shared"),
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
-                st.altair_chart(kline_chart, use_container_width=True)
+                st.altair_chart(kline_chart, width="stretch")
                 st.caption("当前历史缓存缺少有效成交量数据。")
         else:
             trend_columns = [column for column in ["close", "ma5", "ma10", "ma20", "ma60"] if column in data.columns]
@@ -2210,7 +3048,7 @@ def render_kline_chart(row: pd.Series, history: pd.DataFrame) -> None:
     candle = base.mark_bar(size=7).encode(y=alt.Y("open:Q", scale=alt.Scale(zero=False)), y2="close:Q", color=alt.Color("direction:N", scale=alt.Scale(domain=["上涨", "下跌"], range=["#d62728", "#2ca02c"])))
     ma = data.melt(id_vars=["date"], value_vars=["ma5", "ma10", "ma20"], var_name="均线", value_name="value").dropna(subset=["value"])
     lines = alt.Chart(ma).mark_line(strokeWidth=1.6).encode(x="date:T", y=alt.Y("value:Q", scale=alt.Scale(zero=False)), color="均线:N")
-    st.altair_chart((wick + candle + lines).properties(height=420), use_container_width=True)
+    st.altair_chart((wick + candle + lines).properties(height=420), width="stretch")
 
 
 def render_volume_chart(history: pd.DataFrame) -> None:
@@ -2220,7 +3058,7 @@ def render_volume_chart(history: pd.DataFrame) -> None:
     bars = alt.Chart(data).mark_bar().encode(x=alt.X("date:T", title="日期"), y=alt.Y("volume:Q", title="成交量"))
     avg = data.melt(id_vars=["date"], value_vars=["avg_volume_5d", "avg_volume_20d"], var_name="均量", value_name="value").dropna(subset=["value"])
     lines = alt.Chart(avg).mark_line().encode(x="date:T", y="value:Q", color="均量:N")
-    st.altair_chart((bars + lines).properties(height=260), use_container_width=True)
+    st.altair_chart((bars + lines).properties(height=260), width="stretch")
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -2359,13 +3197,14 @@ def style_watch_table(data: pd.DataFrame) -> Any:
     for column in ["浮盈浮亏", "浮盈浮亏比例"]:
         if column in data.columns:
             styled = apply_styler_map(styled, _pct_chg_style, subset=[column])
-    if "评分" in data.columns:
-        styled = apply_styler_map(styled, _score_badge_style, subset=["评分"])
+    for column in ["评分", "基础评分", "最终交易评分"]:
+        if column in data.columns:
+            styled = apply_styler_map(styled, _score_badge_style, subset=[column])
     if "等级" in data.columns:
         styled = apply_styler_map(styled, _level_badge_style, subset=["等级"])
     if "操作状态" in data.columns:
         styled = apply_styler_map(styled, _action_state_style, subset=["操作状态"])
-    for column in ["位置风险", "T+1 风险"]:
+    for column in ["风险等级", "位置风险", "T+1 风险"]:
         if column in data.columns:
             styled = apply_styler_map(styled, _risk_badge_style, subset=[column])
     if "数据状态" in data.columns:
@@ -2535,7 +3374,7 @@ def _render_records(records: list[dict[str, Any]]) -> None:
     if not records:
         st.info("当前公开源暂未获取到板块强度数据，后续可接入东方财富板块源或其它公开源。")
         return
-    st.dataframe(clean_display_frame(pd.DataFrame(records)), use_container_width=True, hide_index=True)
+    st.dataframe(clean_display_frame(pd.DataFrame(records)), width="stretch", hide_index=True)
 
 
 def _format_aux_table(data: pd.DataFrame) -> pd.DataFrame:
