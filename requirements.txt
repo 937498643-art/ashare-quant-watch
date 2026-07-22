@@ -1,0 +1,13 @@
+akshare
+altair
+jqdatasdk
+numpy
+pandas
+plotly
+python-dotenv
+PyYAML
+requests
+schedule
+sqlalchemy
+streamlit
+tushare

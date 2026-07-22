@@ -1,0 +1,125 @@
+project:
+  name: quant_stock_watch
+  description: "A 股个股量化盯盘系统：只读行情、筛选、复核、风险提示和提醒，严禁自动交易。"
+
+runtime:
+  # 2-3 分钟刷新一次。第一版默认 180 秒。
+  scan_interval_seconds: 180
+  refresh_seconds: 180
+  run_forever: false
+  timezone: Asia/Shanghai
+  history_calc_limit: 300
+  active_watchlist_size: 30
+
+feature_flags:
+  enable_kline_detail: true
+  enable_sector_strength: true
+  enable_market_environment: true
+  enable_turnover_scoring: true
+  enable_position_risk: true
+  enable_tracking: true
+  enable_money_strength: true
+  enable_announcement_risk: false
+  enable_theme_heat: true
+  enable_action_state: true
+  enable_t1_risk: true
+  enable_watchlist: true
+
+theme_keywords:
+  - AI
+  - 算力
+  - 光模块
+  - CPO
+  - 半导体
+  - 芯片
+  - 机器人
+  - 商业航天
+  - 低空经济
+  - 军工
+  - 证券
+  - 电力
+  - 固态电池
+  - 新能源
+  - 数据中心
+  - 液冷
+  - 国产替代
+
+data_source:
+  current: akshare
+  primary: akshare_eastmoney
+  fallback: null
+  timeout_seconds: 15
+  timeout: 10
+  retry_count: 2
+  request_interval_seconds: 0.5
+  use_env_proxy: false
+  push2_page_size: 50
+  push2_max_pages: 80
+  local_broker_enabled: false
+  local_broker_path: data/local_broker/cmbc_quote_sample.csv
+  future_providers:
+    - qmt
+    - ifind
+    - tushare
+
+filters:
+  exclude_st: true
+  exclude_delisting_risk: true
+  exclude_suspended: true
+  min_price: 3.0
+  min_turnover_amount: 100000000
+  min_volume_ratio: 1.0
+
+board_filter:
+  include:
+    - sh_main
+    - sz_main
+    - chi_next
+    - star_market
+    - bj
+  exclude: []
+
+indicators:
+  moving_averages:
+    - 5
+    - 10
+    - 20
+  fields:
+    - 成交额
+    - 涨跌幅
+    - 换手率
+    - 量比
+
+strategies:
+  volume_breakout:
+    enabled: true
+    name: 放量突破
+  low_volume_pullback:
+    enabled: true
+    name: 缩量回踩
+  bullish_ma_alignment:
+    enabled: true
+    name: 趋势多头排列
+
+alerts:
+  email:
+    enabled: false
+    smtp_host: smtp.example.com
+    smtp_port: 465
+    use_ssl: true
+    username: ""
+    password_env: QUANT_STOCK_WATCH_EMAIL_PASSWORD
+    sender: ""
+    recipients: []
+
+risk_boundary:
+  allow_trading: false
+  forbidden_actions:
+    - 买入
+    - 卖出
+    - 撤单
+    - 委托
+    - 银证转账
+    - 保存证券账号
+    - 保存交易密码
+    - 保存验证码

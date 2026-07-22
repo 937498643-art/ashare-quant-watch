@@ -1,0 +1,38 @@
+# Secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments and bytecode
+.venv/
+venv/
+env/
+.agents/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS and runtime logs
+.DS_Store
+logs/
+
+# Local market data, runtime output, historical caches, and user records
+data/
+
+# Personal watchlist and holdings configuration
+config/watchlist.yaml
+
+# Local databases
+*.db
+
+# Local migration and validation reports
+mac_final_check.md
+history_database_check.md
+market_history_check.md
